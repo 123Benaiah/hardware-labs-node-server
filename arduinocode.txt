@@ -1,0 +1,207 @@
+#include <WiFi.h>
+#include <WebSocketsClient.h>
+#include <HTTPClient.h>
+#include <DHT.h>
+#include <RTClib.h>
+#include <LiquidCrystal.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+// LCD Configuration
+#define LCD_RS  27
+#define LCD_E   26
+#define LCD_D4  14
+#define LCD_D5  12
+#define LCD_D6  13
+#define LCD_D7  15
+LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
+
+// WiFi Configuration
+const char* ssid = "Library Basement";
+const char* password = "LB/Eduroam";
+
+// Server Configuration
+const char* websocket_server = "172.16.23.17";
+const char* http_server = "172.16.23.17";
+const uint16_t port = 3000;
+const int bulbPin = 2;
+
+// Hardware Configuration
+#define BULB1_PIN 25
+#define BULB2_PIN 33
+#define DHTPIN 4
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// RFID Configuration
+#define RST_PIN 5
+#define SS_PIN 17
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+const String authorizedTag1 = "63 8D 75 DA";
+const String authorizedTag2 = "CC 68 8A 3F";
+
+// Timing Configuration
+const unsigned long sensorInterval = 2000;
+unsigned long previousMillis = 0;
+
+// Sensor values
+float currentTemp = 0;
+float currentHumidity = 0;
+
+WebSocketsClient webSocket;
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial); // Wait for serial port
+  
+  // Initialize SPI for RFID first
+  SPI.begin();
+  mfrc522.PCD_Init();
+  Serial.println("RFID Reader Initialized");
+ // Initialize hardware
+  pinMode(bulbPin, OUTPUT);
+  digitalWrite(bulbPin, LOW);
+  // Initialize hardware
+  pinMode(BULB1_PIN, OUTPUT);
+  pinMode(BULB2_PIN, OUTPUT);
+  digitalWrite(BULB1_PIN, LOW);
+  digitalWrite(BULB2_PIN, LOW);
+  
+  dht.begin();
+  
+  // Initialize LCD
+  lcd.begin(20, 4);
+  lcd.print("Initializing...");
+  
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected");
+  
+  // WebSocket connection
+  webSocket.begin(websocket_server, port, "/");
+  webSocket.onEvent(webSocketEvent);
+  
+  lcd.clear();
+  lcd.print("System Ready");
+}
+
+void loop() {
+  webSocket.loop();
+  
+  // RFID Reading (using your working method)
+  if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+    handleRFID();
+    mfrc522.PICC_HaltA();
+    mfrc522.PCD_StopCrypto1();
+    delay(3000); // Keep bulbs on for 3 seconds
+    digitalWrite(BULB1_PIN, LOW);
+    digitalWrite(BULB2_PIN, LOW);
+  }
+
+  // Sensor reading
+  if (millis() - previousMillis >= sensorInterval) {
+    previousMillis = millis();
+    readSensors();
+  }
+}
+
+void handleRFID() {
+  String uid = "";
+  for (byte i = 0; i < mfrc522.uid.size; i++) {
+    if (mfrc522.uid.uidByte[i] < 0x10) uid += "0";
+    uid += String(mfrc522.uid.uidByte[i], HEX);
+    if (i < mfrc522.uid.size - 1) uid += " ";
+  }
+  uid.toUpperCase();
+
+  Serial.print("Scanned UID: ");
+  Serial.println(uid);
+  
+  if (uid == authorizedTag1) {
+    Serial.println("Authorized Tag 1 - Bulb 1 ON");
+    digitalWrite(BULB1_PIN, HIGH);
+    sendRfidEvent("granted access", uid, "bulb1_on");
+  } 
+  else if (uid == authorizedTag2) {
+    Serial.println("Authorized Tag 2 - Bulb 2 ON");
+    digitalWrite(BULB2_PIN, HIGH);
+    sendRfidEvent("unauthorized access", uid, "bulb2_on");
+  } 
+  else {
+    Serial.println("Unauthorized Tag");
+    sendRfidEvent("denied", uid, "bulbs_off");
+  }
+}
+
+void sendRfidEvent(String status, String tag, String action) {
+  HTTPClient http;
+  http.begin("http://" + String(http_server) + ":" + port + "/api/rfid-event");
+  http.addHeader("Content-Type", "application/json");
+  String payload = "{\"status\":\"" + status + "\",\"tag\":\"" + tag + "\",\"action\":\"" + action + "\"}";
+  http.POST(payload);
+  http.end();
+}
+
+void readSensors() {
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  
+  if (!isnan(h) && !isnan(t)) {
+    currentTemp = t;
+    currentHumidity = h;
+    updateLCD();
+    
+    HTTPClient http;
+    http.begin("http://" + String(http_server) + ":" + port + "/api/sensor-data");
+    http.addHeader("Content-Type", "application/json");
+    String payload = "{\"temperature\":" + String(t,1) + ",\"humidity\":" + String(h,1) + "}";
+    http.POST(payload);
+    http.end();
+  }
+}
+
+void updateLCD() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Temp: ");
+  lcd.print(currentTemp, 1);
+  lcd.print(" C");
+  
+  lcd.setCursor(0, 1);
+  lcd.print("Hum:  ");
+  lcd.print(currentHumidity, 1);
+  lcd.print(" %");
+}
+
+void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.println("[WS] Disconnected");
+      break;
+    case WStype_CONNECTED:
+      Serial.println("[WS] Connected");
+      break;
+    case WStype_TEXT:
+      if (strcmp((char*)payload, "bulb1_on") == 0) {
+        digitalWrite(BULB1_PIN, HIGH);
+      } 
+      else if (strcmp((char*)payload, "bulb2_on") == 0) {
+        digitalWrite(BULB2_PIN, HIGH);
+      }
+      else if (strcmp((char*)payload, "bulbs_off") == 0) {
+        digitalWrite(BULB1_PIN, LOW);
+        digitalWrite(BULB2_PIN, LOW);
+      }
+      else if (strcmp((char*)payload, "on") == 0) {
+        digitalWrite(bulbPin, HIGH);
+      }
+      else if (strcmp((char*)payload, "off") == 0) {
+        digitalWrite(bulbPin, LOW);
+      }
+      break;
+  }
+}

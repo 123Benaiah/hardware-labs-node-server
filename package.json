@@ -1,11 +1,11 @@
 {
-  "name": "hardwarelab-node-server",
+  "name": "bulb-node-server",
   "version": "1.0.0",
   "description": "",
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server"
+    "start": "node server.js"
   },
   "keywords": [],
   "author": "",
@@ -13,7 +13,13 @@
   "type": "commonjs",
   "dependencies": {
     "body-parser": "^2.2.0",
+    "bulb-node-server": "file:",
     "cors": "^2.8.5",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "firebase-admin": "^13.4.0",
+    "http": "^0.0.1-security",
+    "morgan": "^1.10.0",
+    "os": "^0.1.2",
+    "ws": "^8.18.2"
   }
 }

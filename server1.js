@@ -19,7 +19,7 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost', 'http://192.168.165.201'],
+  origin: ['http://localhost', 'http://172.16.23.17'],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type']
 }));
