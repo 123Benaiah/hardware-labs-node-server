@@ -143,6 +143,22 @@ void handleRFID() {
 
   Serial.print("Scanned UID: ");
   Serial.println(uid);
+  
+  if (uid == authorizedTag1) {
+  Serial.println("Authorized Tag 1 - Bulb 1 ON");
+  digitalWrite(BULB1_PIN, HIGH);
+  sendRfidEvent("granted access", uid, "bulb1_on");
+
+  // Notify Mega to beep once
+  Serial2.println("{\"type\":\"rfid\",\"status\":\"granted\"}");
+} 
+else {
+  Serial.println("Unauthorized Tag");
+  sendRfidEvent("denied", uid, "bulbs_off");
+
+  // Notify Mega to beep 3 times
+  Serial2.println("{\"type\":\"rfid\",\"status\":\"denied\"}");
+}
 
   if (uid == authorizedTag1) {
     Serial.println("Authorized Tag 1 - Bulb 1 ON");
@@ -158,6 +174,7 @@ void handleRFID() {
     Serial.println("Unauthorized Tag");
     sendRfidEvent("denied", uid, "bulbs_off");
   }
+
 }
 
 void sendRfidEvent(String status, String tag, String action) {
