@@ -7,7 +7,7 @@ const morgan = require('morgan');
 const admin = require('firebase-admin');
 
 // Initialize Firebase
-const serviceAccount = require('./firebase-config.json'); // Ensure this path is correct
+const serviceAccount = require('./firebase-config.json');
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
   databaseURL: "https://hardware-esp32-default-rtdb.firebaseio.com"
@@ -19,7 +19,7 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost', 'http://192.168.165.201'],
+  origin: ['http://localhost', 'http://192.168.102.201'],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type']
 }));
@@ -117,7 +117,7 @@ function broadcast(message) {
   });
 }
 
-// Bulb control endpoints (from code 1)
+// Bulb control endpoints
 app.get('/on', (req, res) => {
   bulbState = 'on';
   sensorData.bulbState = true;
@@ -144,7 +144,7 @@ app.get('/status', (req, res) => {
   });
 });
 
-// Sensor data endpoints (from code 2)
+// Sensor data endpoints
 app.post('/api/sensor-data', async (req, res) => {
   try {
     const { temperature, humidity, timestamp, datetime } = req.body;
@@ -185,7 +185,6 @@ app.post('/api/sensor-data', async (req, res) => {
   }
 });
 
-// Additional API endpoints (from code 2)
 app.get('/api/sensor-data', (req, res) => {
   try {
     res.status(200).json({
@@ -201,13 +200,14 @@ app.get('/api/sensor-data', (req, res) => {
     });
   }
 });
-//rfid implementation
-// RFID Event endpoint
+
+// RFID implementation
 app.post('/api/rfid-event', async (req, res) => {
   try {
-    const { status, tag } = req.body; // Removed bulb state reference
+    const { status, tag } = req.body;
     const now = new Date();
-      // Update bulb state based on RFID scan
+    
+    // Update bulb state based on RFID scan
     if (status === 'granted access') {
       bulbState = 'on';
       sensorData.bulbState = true;
@@ -216,7 +216,7 @@ app.post('/api/rfid-event', async (req, res) => {
       sensorData.bulbState = false;
     }
     
-    // Store RFID event in Firebase (without bulb state)
+    // Store RFID event in Firebase
     const eventRef = db.ref('rfid_events').push();
     await eventRef.set({
       status,
@@ -243,7 +243,6 @@ app.post('/api/rfid-event', async (req, res) => {
   }
 });
 
-// Get latest RFID events with pagination
 app.get('/api/rfid-events', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
@@ -263,7 +262,7 @@ app.get('/api/rfid-events', async (req, res) => {
     res.status(200).json({
       status: 'success',
       count: events.length,
-      data: events.reverse() // Newest first
+      data: events.reverse()
     });
     
   } catch (error) {
@@ -275,6 +274,49 @@ app.get('/api/rfid-events', async (req, res) => {
   }
 });
 
+// 1. Receive Keypad Events
+app.post('/api/keypad-events', async (req, res) => {
+  const data = req.body;
+  console.log("Received Keypad Event:", data);
+
+  try {
+    const ref = db.ref('keypad_events').push();
+    await ref.set({
+      type: data.type || "keypad",
+      status: data.status || "",
+      pin: data.pin || "",
+      timestamp: Date.now()
+    });
+
+    res.status(200).json({ message: "Keypad event stored in Firebase." });
+  } catch (err) {
+    console.error("Error writing to Firebase:", err);
+    res.status(500).json({ error: "Failed to store keypad event." });
+  }
+});
+
+// 2. Receive RFID Events
+app.post('/api/rfid-event', async (req, res) => {
+  const data = req.body;
+  console.log("Received RFID Event:", data);
+
+  try {
+    const ref = db.ref('rfid_events').push();
+    await ref.set({
+      status: data.status || "",
+      tag: data.tag || "",
+      action: data.action || "",
+      timestamp: Date.now()
+    });
+
+    res.status(200).json({ message: "RFID event stored in Firebase." });
+  } catch (err) {
+    console.error("Error writing to Firebase:", err);
+    res.status(500).json({ error: "Failed to store RFID event." });
+  }
+});
+
+// Health check endpoint
 app.get('/api/health', (req, res) => {
   res.status(200).json({
     status: 'running',
