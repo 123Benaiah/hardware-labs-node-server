@@ -1,0 +1,65 @@
+#include <Keypad.h>
+
+// ------------------ KEYPAD CONFIGURATION ------------------
+const byte ROWS = 4;
+const byte COLS = 4;
+char keys[ROWS][COLS] = {
+  {'1','2','3','A'},
+  {'4','5','6','B'},
+  {'7','8','9','C'},
+  {'*','0','#','D'}
+};
+byte rowPins[ROWS] = {22, 23, 24, 25};
+byte colPins[COLS] = {26, 27, 28, 29};
+
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+// ------------------ SERIAL COMMUNICATION ------------------
+// Arduino Mega TX1 (pin 18) -> ESP32 RX (GPIO16)
+// Arduino Mega RX1 (pin 19) -> ESP32 TX (GPIO17)
+
+const String correctPIN = "5555";
+String enteredPIN = "";
+
+void setup() {
+  Serial.begin(9600);    // Debug monitor
+  Serial1.begin(9600);   // Serial1 for ESP32 communication
+
+  Serial.println("System ready. Enter PIN and press #.");
+}
+
+void loop() {
+  char key = keypad.getKey();
+
+  if (key) {
+    if (key == '#') {
+      String status = (enteredPIN == correctPIN) ? "granted" : "denied";
+      String payload = "{\"type\":\"keypad\",\"status\":\"" + status + "\",\"pin\":\"" + enteredPIN + "\"}";
+
+      Serial.println("Sending to ESP32: " + payload);
+      Serial1.println(payload); // <-- This sends to ESP32
+
+      enteredPIN = "";
+    }
+    else if (key == '*') {
+      enteredPIN = "";
+      Serial.println("Input cleared.");
+    }
+    else if (isdigit(key)) {
+      if (enteredPIN.length() < 6) {
+        enteredPIN += key;
+        Serial.print('*');
+      } else {
+        Serial.println("Max PIN length reached.");
+      }
+    }
+    delay(100);
+  }
+
+  if (Serial1.available()) {
+    String espData = Serial1.readStringUntil('\n');
+    espData.trim();
+    Serial.print("Received from ESP32: ");
+    Serial.println(espData);
+  }
+}
