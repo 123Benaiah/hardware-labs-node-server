@@ -4,6 +4,23 @@
 #include <MFRC522.h>
 #include <LiquidCrystal.h>
 
+// ------------------- COMMUNICATION PORTS -------------------
+#define espSerial Serial1  // ESP32 on TX1(18), RX1(19)
+#define gsmSerial Serial2  // SIM900 on TX2(16), RX2(17)
+
+// ------------------- SYSTEM CONFIG -------------------
+const String authorizedNumber = "+260981489062";  // Allowed sender
+const String systemNumber = "+260970846745";      // Your SIM number
+bool systemEnabled = true;                        // System status flag
+
+// ------------------- DISPLAY STATES -------------------
+enum DisplayState {
+  MAIN_SCREEN,
+  PIN_ENTRY,
+  ACCESS_SCREEN
+};
+DisplayState currentDisplayState = MAIN_SCREEN;
+
 // ------------------- KEYPAD CONFIG -------------------
 const byte ROWS = 4;
 const byte COLS = 4;
@@ -17,36 +34,39 @@ byte rowPins[ROWS] = { 22, 23, 24, 25 };
 byte colPins[COLS] = { 26, 27, 28, 29 };
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
-// ------------------- BUZZER, SERVO, BULBS -------------------
+// ------------------- HARDWARE CONFIG -------------------
 const int buzzerPin = 42;
 Servo gateServo;
 const int servoPin = 2;
-
-const int bulb1Pin = 40;  // bulb1 (authorized tag)
-const int bulb2Pin = 41;  // bulb2 (unauthorized tag)
+const int bulb1Pin = 40;  // Authorized (green)
+const int bulb2Pin = 41;  // Unauthorized (red)
 
 // ------------------- LCD CONFIG -------------------
-#define LCD_RS 30
-#define LCD_E 31
-#define LCD_D4 32
-#define LCD_D5 33
-#define LCD_D6 34
-#define LCD_D7 35
-LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
+LiquidCrystal lcd(30, 31, 32, 33, 34, 35);  // RS, E, D4-D7
 
 // ------------------- RFID CONFIG -------------------
 #define SS_PIN 53
 #define RST_PIN 5
 MFRC522 mfrc522(SS_PIN, RST_PIN);
-
 const String authorizedTag1 = "63 8D 75 DA";
 const String authorizedTag2 = "CC 68 8A 3F";
 
-// ------------------- PIN LOGIC -------------------
+// ------------------- SECURITY CONFIG -------------------
 const String correctPIN = "5555";
 String enteredPIN = "";
+String currentSender = "";
+float lastTemp = 0;
+float lastHumidity = 0;
+unsigned long lastAccessTime = 0;
+const unsigned long accessScreenTimeout = 3000;  // 3 seconds
+
+// GSM message buffer
+String gsmBuffer = "";
+unsigned long lastGSMCheck = 0;
+const unsigned long gsmCheckInterval = 1000;
 
 void setup() {
+  // Initialize hardware
   pinMode(buzzerPin, OUTPUT);
   digitalWrite(buzzerPin, LOW);
 
@@ -58,27 +78,263 @@ void setup() {
   digitalWrite(bulb1Pin, LOW);
   digitalWrite(bulb2Pin, LOW);
 
+  // Initialize displays
   lcd.begin(20, 4);
-  lcd.print("System Starting...");
+  lcd.print("System Booting...");
 
+  // Initialize RFID
   SPI.begin();
   mfrc522.PCD_Init();
 
-  Serial.begin(9600);   // Debug
-  Serial1.begin(9600);  // From ESP32
+  // Initialize serial ports
+  Serial.begin(9600);     // Debug console
+  espSerial.begin(9600);  // ESP32
+  gsmSerial.begin(9600);  // SIM900
+
+  // Setup GSM
+  setupGSM();
 
   lcd.setCursor(0, 1);
-  lcd.print("Waiting for data...");
+  lcd.print("Initializing GSM...");
+  delay(2000);
+  displayMainScreen();
 }
 
 void loop() {
-  handleKeypad();
-  handleRFID();
-  handleSensorData();
+  if (systemEnabled) {
+    handleKeypad();
+    handleRFID();
+    handleSensorData();
+  }
+  
+  // Check for GSM messages regularly
+  if (millis() - lastGSMCheck > gsmCheckInterval) {
+    handleGSM();
+    lastGSMCheck = millis();
+  }
+
+  // Return to main screen after timeout
+  if (currentDisplayState == ACCESS_SCREEN && millis() - lastAccessTime > accessScreenTimeout) {
+    displayMainScreen();
+  }
+
+  delay(10);
 }
 
-// ------------------- KEYPAD -------------------
-// ------------------- KEYPAD -------------------
+// =================== DISPLAY FUNCTIONS ===================
+void displayMainScreen() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Temp: ");
+  lcd.print(lastTemp, 1);
+  lcd.print("C");
+  lcd.setCursor(0, 1);
+  lcd.print("Hum:  ");
+  lcd.print(lastHumidity, 1);
+  lcd.print("%");
+  lcd.setCursor(0, 2);
+  lcd.print("System: ");
+  lcd.print(systemEnabled ? "ENABLED" : "DISABLED");
+  lcd.setCursor(0, 3);
+  lcd.print("Press * for PIN");
+  currentDisplayState = MAIN_SCREEN;
+}
+
+void displayPinEntryScreen() {
+  if (!systemEnabled) {
+    lcd.clear();
+    lcd.print("SYSTEM DISABLED");
+    lcd.setCursor(0, 1);
+    lcd.print("Contact admin");
+    beep(3, 200);
+    delay(2000);
+    displayMainScreen();
+    return;
+  }
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Enter PIN:");
+  lcd.setCursor(0, 1);
+  lcd.print("                ");  // Clear line for asterisks
+  currentDisplayState = PIN_ENTRY;
+}
+
+// =================== GSM FUNCTIONS ===================
+void setupGSM() {
+  Serial.println("Initializing GSM Module...");
+  
+  // Reset module
+  sendATCommand("AT+CFUN=1,1", "OK", 5000);
+  delay(2000);
+  
+  // Basic initialization commands
+  sendATCommand("AT", "OK", 2000);                  // Handshake
+  sendATCommand("ATE0", "OK", 2000);                // Echo off
+  sendATCommand("AT+CMGF=1", "OK", 2000);           // Text mode
+  sendATCommand("AT+CNMI=1,2,0,0,0", "OK", 2000);   // New SMS notification
+  sendATCommand("AT+CSMP=17,167,0,0", "OK", 1000);  // Text mode params
+  sendATCommand("AT+CMGD=1,4", "OK", 2000);         // Delete all messages
+  
+  // Check signal quality
+  String signal = sendATCommand("AT+CSQ", "OK", 1000);
+  Serial.print("Signal quality: ");
+  Serial.println(signal);
+  
+  Serial.println("GSM Module Ready");
+}
+
+String sendATCommand(String cmd, String ack, unsigned long timeout) {
+  String response = "";
+  gsmSerial.println(cmd);
+  unsigned long startTime = millis();
+
+  while (millis() - startTime < timeout) {
+    while (gsmSerial.available()) {
+      char c = gsmSerial.read();
+      response += c;
+      if (response.endsWith(ack)) {
+        return response;
+      }
+    }
+  }
+  Serial.print("GSM Response: ");
+  Serial.println(response);
+  return response;
+}
+
+void handleGSM() {
+  while (gsmSerial.available()) {
+    char c = gsmSerial.read();
+    gsmBuffer += c;
+    
+    // Check for complete message
+    if (c == '\n' || gsmBuffer.length() > 200) {
+      gsmBuffer.trim();
+      Serial.print("GSM Received: ");
+      Serial.println(gsmBuffer);
+      
+      if (gsmBuffer.startsWith("+CMT:")) {
+        // Extract sender number
+        int start = gsmBuffer.indexOf('"') + 1;
+        int end = gsmBuffer.indexOf('"', start);
+        currentSender = gsmBuffer.substring(start, end);
+        Serial.print("Message from: ");
+        Serial.println(currentSender);
+        
+        // Read message content (next line)
+        unsigned long startTime = millis();
+        String message = "";
+        while (millis() - startTime < 1000) {
+          if (gsmSerial.available()) {
+            char m = gsmSerial.read();
+            message += m;
+            if (m == '\n') break;
+          }
+        }
+        message.trim();
+        Serial.print("Message content: ");
+        Serial.println(message);
+        
+        if (currentSender == authorizedNumber) {
+          processSMSCommand(message);
+        } else {
+          sendAutoReply("Unauthorized access blocked");
+        }
+      }
+      gsmBuffer = ""; // Clear buffer
+    }
+  }
+}
+
+void processSMSCommand(String cmd) {
+  cmd.toUpperCase();
+  cmd.trim();
+
+  Serial.print("Processing command: ");
+  Serial.println(cmd);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("SMS Command:");
+  lcd.setCursor(0, 1);
+  lcd.print(cmd);
+
+  if (cmd == "OPEN") {
+    if (systemEnabled) {
+      grantAccess("SMS COMMAND");
+      sendSMS(authorizedNumber, "GATE OPENED\nSystem: " + systemNumber);
+    } else {
+      sendSMS(authorizedNumber, "SYSTEM DISABLED\nCannot open gate\nSystem: " + systemNumber);
+      lcd.setCursor(0, 2);
+      lcd.print("SYSTEM DISABLED");
+      beep(3, 100);
+    }
+  } 
+  else if (cmd == "STATUS") {
+    String status = "SYSTEM STATUS\n";
+    status += "Temp: " + String(lastTemp) + "C\n";
+    status += "Humidity: " + String(lastHumidity) + "%\n";
+    status += "Status: " + String(systemEnabled ? "ENABLED" : "DISABLED") + "\n";
+    status += "System: " + systemNumber;
+    sendSMS(authorizedNumber, status);
+    lcd.setCursor(0, 2);
+    lcd.print("STATUS SENT");
+    beep(1, 100);
+  } 
+  else if (cmd == "CLOSE") {
+    systemEnabled = false;
+    sendSMS(authorizedNumber, "SYSTEM DISABLED\nSystem: " + systemNumber);
+    lcd.setCursor(0, 2);
+    lcd.print("SYSTEM DISABLED");
+    beep(2, 200);
+  } 
+  else if (cmd == "SEGUKA") {
+    systemEnabled = true;
+    sendSMS(authorizedNumber, "SYSTEM ENABLED\nSystem: " + systemNumber);
+    lcd.setCursor(0, 2);
+    lcd.print("SYSTEM ENABLED");
+    beep(1, 200);
+  } 
+  else {
+    sendSMS(authorizedNumber, "INVALID COMMAND\nValid: OPEN, STATUS, CLOSE, SEGUKA\nSystem: " + systemNumber);
+    lcd.setCursor(0, 2);
+    lcd.print("INVALID COMMAND");
+    beep(3, 100);
+  }
+  
+  delay(2000);
+  displayMainScreen();
+}
+
+void sendSMS(String number, String message) {
+  Serial.print("Sending SMS to: ");
+  Serial.println(number);
+  Serial.print("Message: ");
+  Serial.println(message);
+
+  gsmSerial.print("AT+CMGS=\"");
+  gsmSerial.print(number);
+  gsmSerial.println("\"");
+  delay(500);
+  
+  gsmSerial.print(message);
+  delay(500);
+  gsmSerial.write(26);  // CTRL+Z to send
+  delay(1000);
+  
+  Serial.println("SMS sent");
+}
+
+void sendAutoReply(String message) {
+  String fullMsg = "AUTO-REPLY\n";
+  fullMsg += "From: " + systemNumber + "\n";
+  fullMsg += message + "\n";
+  fullMsg += "Time: " + getTimeStamp();
+  sendSMS(currentSender, fullMsg);
+}
+
+// =================== KEYPAD FUNCTIONS ===================
 void handleKeypad() {
   char key = keypad.getKey();
 
@@ -87,148 +343,149 @@ void handleKeypad() {
 
     if (key == '#') {
       if (enteredPIN.length() == 0) {
-        Serial.println("No PIN entered.");
         lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("No PIN entered");
+        lcd.print("NO PIN ENTERED");
         beep(2, 100);
+        delay(1000);
+        displayMainScreen();
       } else {
         String status = (enteredPIN == correctPIN) ? "granted" : "denied";
         String payload = "{\"type\":\"keypad\",\"status\":\"" + status + "\",\"pin\":\"" + enteredPIN + "\"}";
-        Serial1.println(payload);
+        espSerial.println(payload);
 
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        if (status == "granted") {
-          lcd.print("Access Granted");
-          digitalWrite(bulb1Pin, HIGH); // green
-          digitalWrite(bulb2Pin, LOW);  // red off
-          beep(1, 100);
-          moveServoGate();
+        if (enteredPIN == correctPIN) {
+          grantAccess("KEYPAD");
         } else {
-          lcd.print("Access Denied");
-          digitalWrite(bulb1Pin, LOW);  // green off
-          digitalWrite(bulb2Pin, HIGH); // red
-          beep(3, 100);
+          denyAccess("WRONG PIN");
         }
-
-        delay(3000); // keep bulb on for 3 sec
-        digitalWrite(bulb1Pin, LOW);
-        digitalWrite(bulb2Pin, LOW);
-        
-        // Return to normal display
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("Temp: ");
-        lcd.setCursor(0, 1);
-        lcd.print("Hum:  ");
-
         enteredPIN = "";
       }
-    } 
-    else if (key == '*') {
+    } else if (key == '*') {
       enteredPIN = "";
-      beep(1, 50);
-    }
-    else if (isdigit(key)) {
+      displayPinEntryScreen();
+    } else if (isdigit(key)) {
+      if (currentDisplayState != PIN_ENTRY) {
+        displayPinEntryScreen();
+      }
+
       if (enteredPIN.length() < 6) {
         enteredPIN += key;
-        // Show asterisks on LCD as user types
-        lcd.setCursor(enteredPIN.length() - 1, 2);
+        lcd.setCursor(enteredPIN.length() - 1, 1);
         lcd.print("*");
       } else {
         beep(2, 50);
       }
     }
-    delay(100);
   }
 }
 
-// ------------------- RFID -------------------
+// =================== RFID FUNCTIONS ===================
 void handleRFID() {
   if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
-    String uid = "";
-    for (byte i = 0; i < mfrc522.uid.size; i++) {
-      if (mfrc522.uid.uidByte[i] < 0x10) uid += "0";
-      uid += String(mfrc522.uid.uidByte[i], HEX);
-      if (i < mfrc522.uid.size - 1) uid += " ";
-    }
-    uid.toUpperCase();
+    String uid = getUID();
 
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    
-    if (uid == authorizedTag1) {
-      lcd.print("Access Granted");
-      digitalWrite(bulb1Pin, HIGH);
-      digitalWrite(bulb2Pin, LOW);
-      Serial1.println("{\"type\":\"rfid\",\"status\":\"granted\",\"tag\":\"" + uid + "\"}");
-      beep(1, 100);
-      moveServoGate();
-    } else if (uid == authorizedTag2) {
-      lcd.print("Access Denied");
-      digitalWrite(bulb1Pin, LOW);
-      digitalWrite(bulb2Pin, HIGH);
-      Serial1.println("{\"type\":\"rfid\",\"status\":\"denied\",\"tag\":\"" + uid + "\"}");
-      beep(3, 100);
+    if (uid == authorizedTag1 || uid == authorizedTag2) {
+      String payload = "{\"type\":\"rfid\",\"status\":\"granted\",\"tag\":\"" + uid + "\"}";
+      espSerial.println(payload);
+      grantAccess("RFID");
     } else {
-      lcd.print("Access Denied");
-      digitalWrite(bulb1Pin, LOW);
-      digitalWrite(bulb2Pin, LOW);
-      Serial1.println("{\"type\":\"rfid\",\"status\":\"denied\",\"tag\":\"" + uid + "\"}");
-      beep(3, 100);
+      String payload = "{\"type\":\"rfid\",\"status\":\"denied\",\"tag\":\"" + uid + "\"}";
+      espSerial.println(payload);
+      denyAccess("INVALID TAG");
     }
 
     mfrc522.PICC_HaltA();
     mfrc522.PCD_StopCrypto1();
-    delay(3000);
-    digitalWrite(bulb1Pin, LOW);
-    digitalWrite(bulb2Pin, LOW);
-    
-    // Return to normal display
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Temp: ");
-    lcd.setCursor(0, 1);
-    lcd.print("Hum:  ");
   }
 }
 
-// ------------------- RECEIVE SENSOR DATA FROM ESP32 -------------------
+String getUID() {
+  String uid = "";
+  for (byte i = 0; i < mfrc522.uid.size; i++) {
+    if (mfrc522.uid.uidByte[i] < 0x10) uid += "0";
+    uid += String(mfrc522.uid.uidByte[i], HEX);
+    if (i < mfrc522.uid.size - 1) uid += " ";
+  }
+  uid.toUpperCase();
+  return uid;
+}
+
+// =================== SENSOR FUNCTIONS ===================
 void handleSensorData() {
-  if (Serial1.available()) {
-    String line = Serial1.readStringUntil('\n');
-    line.trim();
-    if (line.startsWith("{\"type\":\"sensor\"")) {
-      // Parse temperature & humidity
-      float temp = parseValue(line, "temperature");
-      float hum = parseValue(line, "humidity");
-      lcd.setCursor(0, 0);
-      lcd.print("Temp: ");
-      lcd.print(temp, 1);
-      lcd.print(" C    ");
-      lcd.setCursor(0, 1);
-      lcd.print("Hum:  ");
-      lcd.print(hum, 1);
-      lcd.print(" %    ");
+  if (espSerial.available()) {
+    String data = espSerial.readStringUntil('\n');
+    data.trim();
+
+    if (data.startsWith("{")) {
+      lastTemp = parseValue(data, "temperature");
+      lastHumidity = parseValue(data, "humidity");
+
+      if (currentDisplayState == MAIN_SCREEN) {
+        lcd.setCursor(6, 0);
+        lcd.print(lastTemp, 1);
+        lcd.print("C ");
+        lcd.setCursor(6, 1);
+        lcd.print(lastHumidity, 1);
+        lcd.print("% ");
+      }
     }
   }
 }
 
-// ------------------- SIMPLE PARSER -------------------
-float parseValue(String json, String key) {
-  int keyIndex = json.indexOf("\"" + key + "\":");
-  if (keyIndex == -1) return 0;
-  int colonIndex = json.indexOf(':', keyIndex);
-  int commaIndex = json.indexOf(',', colonIndex + 1);
-  if (commaIndex == -1) commaIndex = json.indexOf('}', colonIndex + 1);
-  String value = json.substring(colonIndex + 1, commaIndex);
-  value.trim();
-  return value.toFloat();
+// =================== ACCESS CONTROL ===================
+void grantAccess(String method) {
+  if (!systemEnabled) {
+    lcd.clear();
+    lcd.print("SYSTEM DISABLED");
+    lcd.setCursor(0, 1);
+    lcd.print("Contact admin");
+    beep(3, 200);
+    delay(2000);
+    displayMainScreen();
+    return;
+  }
+  
+  lcd.clear();
+  lcd.print("ACCESS GRANTED");
+  lcd.setCursor(0, 1);
+  lcd.print(method);
+
+  digitalWrite(bulb1Pin, HIGH);
+  digitalWrite(bulb2Pin, LOW);
+  beep(1, 100);
+  delay(2000);
+  digitalWrite(bulb1Pin, LOW);
+  digitalWrite(bulb2Pin, LOW);
+  moveServoGate();
+  String logMsg = "ACCESS: " + method + "\nSystem: " + systemNumber;
+  sendSMS(authorizedNumber, logMsg);
+
+  currentDisplayState = ACCESS_SCREEN;
+  lastAccessTime = millis();
 }
 
-// ------------------- UTILS -------------------
+void denyAccess(String reason) {
+  lcd.clear();
+  lcd.print("ACCESS DENIED");
+  lcd.setCursor(0, 1);
+  lcd.print(reason);
+
+  digitalWrite(bulb1Pin, LOW);
+  digitalWrite(bulb2Pin, HIGH);
+  beep(3, 100);
+  delay(2000);
+  digitalWrite(bulb1Pin, LOW);
+  digitalWrite(bulb2Pin, LOW);
+  String logMsg = "DENIED: " + reason + "\nSystem: " + systemNumber;
+  sendSMS(authorizedNumber, logMsg);
+  currentDisplayState = ACCESS_SCREEN;
+  lastAccessTime = millis();
+}
+
+// =================== UTILITY FUNCTIONS ===================
 void moveServoGate() {
+  if (!systemEnabled) return;
+  
   gateServo.write(90);
   delay(5000);
   gateServo.write(0);
@@ -241,4 +498,19 @@ void beep(int times, int duration) {
     digitalWrite(buzzerPin, LOW);
     delay(100);
   }
+}
+
+String getTimeStamp() {
+  return String(millis() / 1000) + "s";
+}
+
+float parseValue(String json, String key) {
+  int keyIndex = json.indexOf("\"" + key + "\":");
+  if (keyIndex == -1) return 0;
+  int colonIndex = json.indexOf(':', keyIndex);
+  int commaIndex = json.indexOf(',', colonIndex + 1);
+  if (commaIndex == -1) commaIndex = json.indexOf('}', colonIndex + 1);
+  String value = json.substring(colonIndex + 1, commaIndex);
+  value.trim();
+  return value.toFloat();
 }
