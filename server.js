@@ -60,33 +60,33 @@ let sensorData = {
   lastUpdated: null
 };
 
-// WebSocket connection handler
-wss.on('connection', (ws) => {
-  clients.add(ws);
-  console.log(`New client connected (${clients.size} total)`);
+// // WebSocket connection handler
+// wss.on('connection', (ws) => {
+//   clients.add(ws);
+//   console.log(`New client connected (${clients.size} total)`);
 
-  // Send current state when client connects
-  ws.send(bulbState);
-  console.log(`Sent initial state: ${bulbState}`);
+//   // Send current state when client connects
+//   ws.send(bulbState);
+//   console.log(`Sent initial state: ${bulbState}`);
 
-  // Handle client messages
-  ws.on('message', (message) => {
-    console.log(`Received from ESP32: ${message}`);
+//   // Handle client messages
+//   ws.on('message', (message) => {
+//     console.log(`Received from ESP32: ${message}`);
 
-    if (message.toString().includes('status:')) {
-      bulbState = message.toString().split(':')[1];
-      console.log(`Bulb status updated to: ${bulbState}`);
-      sensorData.bulbState = bulbState === 'on';
-      updateFirebase();
-    }
-  });
+//     if (message.toString().includes('status:')) {
+//       bulbState = message.toString().split(':')[1];
+//       console.log(`Bulb status updated to: ${bulbState}`);
+//       sensorData.bulbState = bulbState === 'on';
+//       updateFirebase();
+//     }
+//   });
 
-  // Handle disconnections
-  ws.on('close', () => {
-    clients.delete(ws);
-    console.log(`Client disconnected (${clients.size} remaining)`);
-  });
-});
+//   // Handle disconnections
+//   ws.on('close', () => {
+//     clients.delete(ws);
+//     console.log(`Client disconnected (${clients.size} remaining)`);
+//   });
+// });
 
 // Update Firebase with current state
 async function updateFirebase() {
@@ -108,32 +108,85 @@ async function updateFirebase() {
   }
 }
 
-// Broadcast to all WebSocket clients
+// Add to your existing Node.js server code
+
+// WebSocket broadcast function
 function broadcast(message) {
-  clients.forEach(client => {
+  wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
+      client.send(JSON.stringify({
+        command: message === 'on' ? 'light_on' : 'light_off',
+        timestamp: new Date().toISOString()
+      }));
     }
   });
 }
 
-// Bulb control endpoints
+// Enhanced bulb control endpoints
 app.get('/on', (req, res) => {
   bulbState = 'on';
   sensorData.bulbState = true;
+  
+  // Broadcast to all WebSocket clients
   broadcast('on');
+  
+  // Update Firebase
   updateFirebase();
+  
   console.log('Bulb ON command sent to all clients');
-  res.send(`Bulb turned ON. Current state: ${bulbState}`);
+  res.json({
+    status: 'success',
+    message: 'Bulb turned ON',
+    currentState: bulbState,
+    timestamp: new Date().toISOString()
+  });
 });
 
 app.get('/off', (req, res) => {
   bulbState = 'off';
   sensorData.bulbState = false;
+  
+  // Broadcast to all WebSocket clients
   broadcast('off');
+  
+  // Update Firebase
   updateFirebase();
+  
   console.log('Bulb OFF command sent to all clients');
-  res.send(`Bulb turned OFF. Current state: ${bulbState}`);
+  res.json({
+    status: 'success',
+    message: 'Bulb turned OFF',
+    currentState: bulbState,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// WebSocket connection handler
+wss.on('connection', (ws) => {
+  console.log('New WebSocket client connected');
+  
+  // Send current state on connection
+  ws.send(JSON.stringify({
+    type: 'init',
+    bulbState: bulbState,
+    timestamp: new Date().toISOString()
+  }));
+  
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      if (data.command === 'light_on') {
+        bulbState = 'on';
+        broadcast('on');
+      } 
+      else if (data.command === 'light_off') {
+        bulbState = 'off';
+        broadcast('off');
+      }
+    } catch (err) {
+      console.error('WebSocket message error:', err);
+    }
+  });
 });
 
 app.get('/status', (req, res) => {
