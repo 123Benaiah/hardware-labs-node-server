@@ -2,15 +2,15 @@
 #include <WebSocketsClient.h>
 #include <HTTPClient.h>
 #include <DHT.h>
-#include <ArduinoJson.h>  // Add this line
+#include <ArduinoJson.h>
 
 // WiFi Configuration
 const char* ssid = "Ben8";
 const char* password = "flutters";
 
 // Server Configuration
-const char* websocket_server = "192.168.23.201";
-const char* http_server = "192.168.23.201";
+const char* websocket_server = "192.168.136.201";
+const char* http_server = "192.168.136.201";
 const uint16_t port = 3000;
 
 // DHT Sensor
@@ -18,15 +18,15 @@ const uint16_t port = 3000;
 #define DHTTYPE DHT11
 DHT dht(DHTPIN, DHTTYPE);
 
-// Relay (bulb control)
-const int bulbPin = 2;
+// Bulb Control
+#define BULB_PIN 2
+String bulbState = "off";
 
 // Timers
 const unsigned long sensorInterval = 5000;
 unsigned long previousMillis = 0;
 float currentTemp = 0;
 float currentHumidity = 0;
-String bulbState = "off";
 
 WebSocketsClient webSocket;
 
@@ -34,9 +34,9 @@ void setup() {
   Serial.begin(115200);
   Serial2.begin(9600, SERIAL_8N1, 16, 17); // Communication with Mega
 
-  pinMode(bulbPin, OUTPUT);
-  digitalWrite(bulbPin, LOW);
-
+  pinMode(BULB_PIN, OUTPUT);
+  digitalWrite(BULB_PIN, LOW);
+  
   dht.begin();
 
   WiFi.begin(ssid, password);
@@ -50,9 +50,6 @@ void setup() {
   webSocket.begin(websocket_server, port, "/");
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000);
-
-  // Send initial bulb state to server
-  sendBulbStatus();
 }
 
 void loop() {
@@ -61,22 +58,60 @@ void loop() {
   // 1. Handle messages from Arduino Mega
   if (Serial2.available()) {
     String payload = Serial2.readStringUntil('\n');
-    payload.trim();
-    Serial.println("From Mega: " + payload);
-
-    // Determine message type
-    if (payload.indexOf("\"type\":\"keypad\"") != -1) {
-      sendKeypadEvent(payload);
-    } 
-    else if (payload.indexOf("\"type\":\"rfid\"") != -1) {
-      sendRFIDEvent(payload);
-    }
+    processMegaMessage(payload);
   }
 
   // 2. Read and send sensor data periodically
   if (millis() - previousMillis >= sensorInterval) {
     previousMillis = millis();
     readAndSendSensorData();
+  }
+}
+
+void processMegaMessage(String payload) {
+  payload.trim();
+  Serial.println("From Mega: " + payload);
+
+  // Parse JSON message
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, payload);
+  
+  if (!error) {
+    // Handle bulb control commands
+    if (doc.containsKey("action")) {
+      String action = doc["action"].as<String>();
+      if (action == "light_on") {
+        setBulbState("on");
+      } else if (action == "light_off") {
+        setBulbState("off");
+      }
+    }
+    // Handle other message types
+    else if (doc.containsKey("type")) {
+      String type = doc["type"].as<String>();
+      if (type == "keypad") {
+        sendKeypadEvent(payload);
+      } 
+      else if (type == "rfid") {
+        sendRFIDEvent(payload);
+      }
+      else if (type == "sensor") {
+        sendHTTPPost("/api/sensor-data", payload);
+      }
+    }
+  }
+}
+
+void setBulbState(String newState) {
+  if (newState != bulbState) {
+    bulbState = newState;
+    digitalWrite(BULB_PIN, (bulbState == "on") ? HIGH : LOW);
+    
+    // Send status updates
+    sendBulbStatusToServer();
+    sendBulbStatusToMega();
+    
+    Serial.println("Bulb state changed to: " + bulbState);
   }
 }
 
@@ -89,16 +124,22 @@ void readAndSendSensorData() {
     currentHumidity = h;
 
     // Create JSON payload
-    String sensorPayload = "{\"temperature\":" + String(t,1) + 
-                          ",\"humidity\":" + String(h,1) + 
-                          ",\"timestamp\":" + String(millis()/1000) + 
-                          ",\"datetime\":\"" + getDateTime() + "\"}";
+    StaticJsonDocument<200> sensorDoc;
+    sensorDoc["type"] = "sensor";
+    sensorDoc["temperature"] = t;
+    sensorDoc["humidity"] = h;
+    sensorDoc["timestamp"] = millis()/1000;
+    sensorDoc["datetime"] = getDateTime();
+    sensorDoc["bulbState"] = bulbState;
+
+    String sensorPayload;
+    serializeJson(sensorDoc, sensorPayload);
 
     // Send to Node server
     sendHTTPPost("/api/sensor-data", sensorPayload);
     
-    // Also send to Mega if needed
-    Serial2.println("{\"type\":\"sensor\",\"temperature\":" + String(t,1) + ",\"humidity\":" + String(h,1) + "}");
+    // Also send to Mega
+    Serial2.println(sensorPayload);
   }
 }
 
@@ -107,17 +148,36 @@ void sendKeypadEvent(String payload) {
 }
 
 void sendRFIDEvent(String payload) {
-  // Simple string manipulation instead of JSON parsing
-  int statusStart = payload.indexOf("\"status\":\"") + 10;
-  int statusEnd = payload.indexOf("\"", statusStart);
-  String status = payload.substring(statusStart, statusEnd);
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, payload);
   
-  int tagStart = payload.indexOf("\"tag\":\"") + 7;
-  int tagEnd = payload.indexOf("\"", tagStart);
-  String tag = payload.substring(tagStart, tagEnd);
+  if (!error) {
+    String status = doc["status"];
+    String tag = doc["tag"];
+    
+    String rfidPayload = "{\"status\":\"" + status + " access\",\"tag\":\"" + tag + "\"}";
+    sendHTTPPost("/api/rfid-event", rfidPayload);
+  }
+}
+
+void sendBulbStatusToServer() {
+  StaticJsonDocument<100> doc;
+  doc["type"] = "bulb_status";
+  doc["state"] = bulbState;
   
-  String rfidPayload = "{\"status\":\"" + status + " access\",\"tag\":\"" + tag + "\"}";
-  sendHTTPPost("/api/rfid-event", rfidPayload);
+  String payload;
+  serializeJson(doc, payload);
+  webSocket.sendTXT(payload);
+}
+
+void sendBulbStatusToMega() {
+  StaticJsonDocument<100> doc;
+  doc["type"] = "status";
+  doc["light"] = bulbState;
+  
+  String payload;
+  serializeJson(doc, payload);
+  Serial2.println(payload);
 }
 
 void sendHTTPPost(String endpoint, String payload) {
@@ -134,30 +194,18 @@ void sendHTTPPost(String endpoint, String payload) {
   http.end();
 }
 
-void sendBulbStatus() {
-  String payload = "status:" + bulbState;
-  webSocket.sendTXT(payload);
-}
-
-void updateBulbState(String newState) {
-  if (newState != bulbState) {
-    bulbState = newState;
-    digitalWrite(bulbPin, (bulbState == "on") ? HIGH : LOW);
-    sendBulbStatus();
-    
-    // Also update sensor data structure
-    String sensorPayload = "{\"bulbState\":" + String(bulbState == "on" ? "true" : "false") + "}";
-    sendHTTPPost("/api/sensor-data", sensorPayload);
-  }
-}
-
 String getDateTime() {
-  // This is a placeholder - in a real implementation you'd get actual time
-  // from NTP or similar
+  // Placeholder - implement with NTP in production
   return "2023-01-01T00:00:00Z";
 }
 
 void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
+  // Variables declared outside switch to avoid cross-initialization
+  StaticJsonDocument<200> doc;
+  DeserializationError error;
+  String message;
+  String cmd;
+
   switch (type) {
     case WStype_DISCONNECTED:
       Serial.println("[WS] Disconnected");
@@ -165,17 +213,20 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
       
     case WStype_CONNECTED:
       Serial.println("[WS] Connected");
-      // Send initial bulb state
-      webSocket.sendTXT("status:" + bulbState);
+      sendBulbStatusToServer(); // Sync current bulb state
       break;
       
     case WStype_TEXT:
-      {
-        String message = (char*)payload;
-        Serial.println("[WS] Received: " + message);
-        
-        if (message == "on" || message == "off") {
-          updateBulbState(message);
+      message = (char*)payload;
+      Serial.println("[WS] Received: " + message);
+      
+      error = deserializeJson(doc, message);
+      if (!error && doc.containsKey("command")) {
+        cmd = doc["command"].as<String>();
+        if (cmd == "light_on") {
+          setBulbState("on");
+        } else if (cmd == "light_off") {
+          setBulbState("off");
         }
       }
       break;

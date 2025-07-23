@@ -9,8 +9,8 @@
 #define gsmSerial Serial2  // SIM900 on TX2(16), RX2(17)
 
 // ------------------- SYSTEM CONFIG -------------------
-const String authorizedNumber = "+260981489062";  // Allowed sender
-const String systemNumber = "+260970846745";      // Your SIM number
+const String authorizedNumber = "+260970846745";  // Allowed sender
+const String systemNumber = "+260981489062";      // Your SIM number
 bool systemEnabled = true;                        // System status flag
 
 // ------------------- DISPLAY STATES -------------------
@@ -40,6 +40,7 @@ Servo gateServo;
 const int servoPin = 2;
 const int bulb1Pin = 40;  // Authorized (green)
 const int bulb2Pin = 41;  // Unauthorized (red)
+const int bulb3Pin = 43;  // System status indicator
 
 // ------------------- LCD CONFIG -------------------
 LiquidCrystal lcd(30, 31, 32, 33, 34, 35);  // RS, E, D4-D7
@@ -75,8 +76,10 @@ void setup() {
 
   pinMode(bulb1Pin, OUTPUT);
   pinMode(bulb2Pin, OUTPUT);
+  pinMode(bulb3Pin, OUTPUT);
   digitalWrite(bulb1Pin, LOW);
   digitalWrite(bulb2Pin, LOW);
+  digitalWrite(bulb3Pin, systemEnabled ? HIGH : LOW);
 
   // Initialize displays
   lcd.begin(20, 4);
@@ -106,7 +109,7 @@ void loop() {
     handleRFID();
     handleSensorData();
   }
-  
+
   // Check for GSM messages regularly
   if (millis() - lastGSMCheck > gsmCheckInterval) {
     handleGSM();
@@ -151,7 +154,7 @@ void displayPinEntryScreen() {
     displayMainScreen();
     return;
   }
-  
+
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("Enter PIN:");
@@ -163,11 +166,11 @@ void displayPinEntryScreen() {
 // =================== GSM FUNCTIONS ===================
 void setupGSM() {
   Serial.println("Initializing GSM Module...");
-  
+
   // Reset module
   sendATCommand("AT+CFUN=1,1", "OK", 5000);
   delay(2000);
-  
+
   // Basic initialization commands
   sendATCommand("AT", "OK", 2000);                  // Handshake
   sendATCommand("ATE0", "OK", 2000);                // Echo off
@@ -175,12 +178,12 @@ void setupGSM() {
   sendATCommand("AT+CNMI=1,2,0,0,0", "OK", 2000);   // New SMS notification
   sendATCommand("AT+CSMP=17,167,0,0", "OK", 1000);  // Text mode params
   sendATCommand("AT+CMGD=1,4", "OK", 2000);         // Delete all messages
-  
+
   // Check signal quality
   String signal = sendATCommand("AT+CSQ", "OK", 1000);
   Serial.print("Signal quality: ");
   Serial.println(signal);
-  
+
   Serial.println("GSM Module Ready");
 }
 
@@ -207,13 +210,13 @@ void handleGSM() {
   while (gsmSerial.available()) {
     char c = gsmSerial.read();
     gsmBuffer += c;
-    
+
     // Check for complete message
     if (c == '\n' || gsmBuffer.length() > 200) {
       gsmBuffer.trim();
       Serial.print("GSM Received: ");
       Serial.println(gsmBuffer);
-      
+
       if (gsmBuffer.startsWith("+CMT:")) {
         // Extract sender number
         int start = gsmBuffer.indexOf('"') + 1;
@@ -221,7 +224,7 @@ void handleGSM() {
         currentSender = gsmBuffer.substring(start, end);
         Serial.print("Message from: ");
         Serial.println(currentSender);
-        
+
         // Read message content (next line)
         unsigned long startTime = millis();
         String message = "";
@@ -235,16 +238,20 @@ void handleGSM() {
         message.trim();
         Serial.print("Message content: ");
         Serial.println(message);
-        
+
         if (currentSender == authorizedNumber) {
           processSMSCommand(message);
         } else {
           sendAutoReply("Unauthorized access blocked");
         }
       }
-      gsmBuffer = ""; // Clear buffer
+      gsmBuffer = "";  // Clear buffer
     }
   }
+}
+
+void updateSystemStatusIndicator() {
+  digitalWrite(bulb3Pin, systemEnabled ? HIGH : LOW);
 }
 
 void processSMSCommand(String cmd) {
@@ -260,7 +267,7 @@ void processSMSCommand(String cmd) {
   lcd.setCursor(0, 1);
   lcd.print(cmd);
 
-  if (cmd == "OPEN") {
+  if (cmd == "DOOR OPEN") {
     if (systemEnabled) {
       grantAccess("SMS COMMAND");
       sendSMS(authorizedNumber, "GATE OPENED\nSystem: " + systemNumber);
@@ -271,7 +278,58 @@ void processSMSCommand(String cmd) {
       beep(3, 100);
     }
   } 
-  else if (cmd == "STATUS") {
+  else if (cmd == "LIGHT ON") {
+    if (systemEnabled) {
+      lcd.clear();
+      lcd.print("TURNING ON LIGHT");
+      String payload = "{\"type\":\"command\",\"action\":\"light_on\"}";
+      espSerial.println(payload);
+      sendSMS(authorizedNumber, "LIGHT TURNED ON\nSystem: " + systemNumber);
+      beep(1, 100);
+    } else {
+      sendSMS(authorizedNumber, "SYSTEM DISABLED\nCannot turn on light\nSystem: " + systemNumber);
+      lcd.setCursor(0, 2);
+      lcd.print("SYSTEM DISABLED");
+      beep(3, 100);
+    }
+  }
+  else if (cmd == "LIGHT OFF") {
+    if (systemEnabled) {
+      lcd.clear();
+      lcd.print("TURNING OFF LIGHT");
+      String payload = "{\"type\":\"command\",\"action\":\"light_off\"}";
+      espSerial.println(payload);
+      sendSMS(authorizedNumber, "LIGHT TURNED OFF\nSystem: " + systemNumber);
+      beep(1, 100);
+    } else {
+      sendSMS(authorizedNumber, "SYSTEM DISABLED\nCannot turn off light\nSystem: " + systemNumber);
+      lcd.setCursor(0, 2);
+      lcd.print("SYSTEM DISABLED");
+      beep(3, 100);
+    }
+  }
+  else if (cmd == "OPEN DOOR WITH BULB ON") {
+    if (systemEnabled) {
+      lcd.clear();
+      lcd.print("OPENING DOOR");
+      lcd.setCursor(0, 1);
+      lcd.print("BULB ON");
+
+      digitalWrite(bulb1Pin, HIGH);
+      moveServoGate();
+
+      delay(3000);
+      digitalWrite(bulb1Pin, LOW);
+
+      sendSMS(authorizedNumber, "DOOR OPENED WITH BULB ON\nSystem: " + systemNumber);
+    } else {
+      sendSMS(authorizedNumber, "SYSTEM DISABLED\nCannot open gate\nSystem: " + systemNumber);
+      lcd.setCursor(0, 2);
+      lcd.print("SYSTEM DISABLED");
+      beep(3, 100);
+    }
+  }
+  else if (cmd == "SYSTEM STATUS") {
     String status = "SYSTEM STATUS\n";
     status += "Temp: " + String(lastTemp) + "C\n";
     status += "Humidity: " + String(lastHumidity) + "%\n";
@@ -281,28 +339,30 @@ void processSMSCommand(String cmd) {
     lcd.setCursor(0, 2);
     lcd.print("STATUS SENT");
     beep(1, 100);
-  } 
-  else if (cmd == "CLOSE") {
+  }
+  else if (cmd == "SYSTEM CLOSE") {
     systemEnabled = false;
+    updateSystemStatusIndicator();
     sendSMS(authorizedNumber, "SYSTEM DISABLED\nSystem: " + systemNumber);
     lcd.setCursor(0, 2);
     lcd.print("SYSTEM DISABLED");
     beep(2, 200);
-  } 
+  }
   else if (cmd == "SEGUKA") {
     systemEnabled = true;
+    updateSystemStatusIndicator();
     sendSMS(authorizedNumber, "SYSTEM ENABLED\nSystem: " + systemNumber);
     lcd.setCursor(0, 2);
     lcd.print("SYSTEM ENABLED");
     beep(1, 200);
-  } 
+  }
   else {
-    sendSMS(authorizedNumber, "INVALID COMMAND\nValid: OPEN, STATUS, CLOSE, SEGUKA\nSystem: " + systemNumber);
+    sendSMS(authorizedNumber, "INVALID COMMAND\nValid: DOOR OPEN, LIGHT ON, LIGHT OFF, SYSTEM STATUS, SYSTEM CLOSE, SEGUKA\nSystem: " + systemNumber);
     lcd.setCursor(0, 2);
     lcd.print("INVALID COMMAND");
     beep(3, 100);
   }
-  
+
   delay(2000);
   displayMainScreen();
 }
@@ -317,12 +377,12 @@ void sendSMS(String number, String message) {
   gsmSerial.print(number);
   gsmSerial.println("\"");
   delay(500);
-  
+
   gsmSerial.print(message);
   delay(500);
   gsmSerial.write(26);  // CTRL+Z to send
   delay(1000);
-  
+
   Serial.println("SMS sent");
 }
 
@@ -439,12 +499,16 @@ void grantAccess(String method) {
     lcd.print("SYSTEM DISABLED");
     lcd.setCursor(0, 1);
     lcd.print("Contact admin");
-    beep(3, 200);
+    beep(6, 200);
+    digitalWrite(bulb2Pin, HIGH);
+    digitalWrite(bulb1Pin, LOW);
     delay(2000);
+    digitalWrite(bulb1Pin, LOW);
+    digitalWrite(bulb2Pin, LOW);
     displayMainScreen();
     return;
   }
-  
+
   lcd.clear();
   lcd.print("ACCESS GRANTED");
   lcd.setCursor(0, 1);
@@ -485,9 +549,12 @@ void denyAccess(String reason) {
 // =================== UTILITY FUNCTIONS ===================
 void moveServoGate() {
   if (!systemEnabled) return;
-  
+
+  // Open door
   gateServo.write(90);
-  delay(5000);
+  delay(5000);  // Keep door open for 5 seconds
+
+  // Close door
   gateServo.write(0);
 }
 

@@ -1,0 +1,3 @@
+AT+CMGF=1
+AT+CNMI=2,2,0,0,0
+AT&W
