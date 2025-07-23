@@ -149,7 +149,7 @@ void displayPinEntryScreen() {
     lcd.print("SYSTEM DISABLED");
     lcd.setCursor(0, 1);
     lcd.print("Contact admin");
-    beep(3, 200);
+    beep(6, 100);
     delay(2000);
     displayMainScreen();
     return;
@@ -275,7 +275,7 @@ void processSMSCommand(String cmd) {
       sendSMS(authorizedNumber, "SYSTEM DISABLED\nCannot open gate\nSystem: " + systemNumber);
       lcd.setCursor(0, 2);
       lcd.print("SYSTEM DISABLED");
-      beep(3, 100);
+      beep(6, 100);
     }
   } 
   else if (cmd == "LIGHT ON") {
@@ -290,7 +290,7 @@ void processSMSCommand(String cmd) {
       sendSMS(authorizedNumber, "SYSTEM DISABLED\nCannot turn on light\nSystem: " + systemNumber);
       lcd.setCursor(0, 2);
       lcd.print("SYSTEM DISABLED");
-      beep(3, 100);
+      beep(6, 100);
     }
   }
   else if (cmd == "LIGHT OFF") {
@@ -305,7 +305,7 @@ void processSMSCommand(String cmd) {
       sendSMS(authorizedNumber, "SYSTEM DISABLED\nCannot turn off light\nSystem: " + systemNumber);
       lcd.setCursor(0, 2);
       lcd.print("SYSTEM DISABLED");
-      beep(3, 100);
+      beep(6, 100);
     }
   }
   else if (cmd == "OPEN DOOR WITH BULB ON") {
@@ -326,7 +326,7 @@ void processSMSCommand(String cmd) {
       sendSMS(authorizedNumber, "SYSTEM DISABLED\nCannot open gate\nSystem: " + systemNumber);
       lcd.setCursor(0, 2);
       lcd.print("SYSTEM DISABLED");
-      beep(3, 100);
+      beep(6, 100);
     }
   }
   else if (cmd == "SYSTEM STATUS") {
@@ -360,7 +360,7 @@ void processSMSCommand(String cmd) {
     sendSMS(authorizedNumber, "INVALID COMMAND\nValid: DOOR OPEN, LIGHT ON, LIGHT OFF, SYSTEM STATUS, SYSTEM CLOSE, SEGUKA\nSystem: " + systemNumber);
     lcd.setCursor(0, 2);
     lcd.print("INVALID COMMAND");
-    beep(3, 100);
+    beep(6, 100);
   }
 
   delay(2000);
@@ -444,7 +444,7 @@ void handleRFID() {
   if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
     String uid = getUID();
 
-    if (uid == authorizedTag1 || uid == authorizedTag2) {
+    if (uid == authorizedTag1) {
       String payload = "{\"type\":\"rfid\",\"status\":\"granted\",\"tag\":\"" + uid + "\"}";
       espSerial.println(payload);
       grantAccess("RFID");
@@ -536,7 +536,7 @@ void denyAccess(String reason) {
 
   digitalWrite(bulb1Pin, LOW);
   digitalWrite(bulb2Pin, HIGH);
-  beep(3, 100);
+  beep(6, 70);
   delay(2000);
   digitalWrite(bulb1Pin, LOW);
   digitalWrite(bulb2Pin, LOW);
