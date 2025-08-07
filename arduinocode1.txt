@@ -1,16 +1,17 @@
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 #include <HTTPClient.h>
+#include <WebServer.h>
 #include <DHT.h>
 #include <ArduinoJson.h>
 
 // WiFi Configuration
-const char* ssid = "Ben8";
-const char* password = "flutters";
+const char* ssid = "HUAWEI-B315-3E81";
+const char* password = "5HAGDER2YRA";
 
 // Server Configuration
-const char* websocket_server = "192.168.136.201";
-const char* http_server = "192.168.136.201";
+const char* websocket_server = "192.168.8.102";
+const char* http_server = "192.168.8.101";
 const uint16_t port = 3000;
 
 // DHT Sensor
@@ -21,6 +22,9 @@ DHT dht(DHTPIN, DHTTYPE);
 // Bulb Control
 #define BULB_PIN 2
 String bulbState = "off";
+
+// Web Server for door control
+WebServer server(80);
 
 // Timers
 const unsigned long sensorInterval = 5000;
@@ -33,34 +37,43 @@ WebSocketsClient webSocket;
 void setup() {
   Serial.begin(115200);
   Serial2.begin(9600, SERIAL_8N1, 16, 17); // Communication with Mega
-
   pinMode(BULB_PIN, OUTPUT);
   digitalWrite(BULB_PIN, LOW);
   
   dht.begin();
-
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   Serial.println("\nWiFi Connected");
-
+  
+  // Print IP address
+  Serial.print("ESP32 IP Address: ");
+  Serial.println(WiFi.localIP());
+  
   // WebSocket setup
   webSocket.begin(websocket_server, port, "/");
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000);
+  
+  // Setup web server endpoints
+  server.on("/door", HTTP_POST, handleDoorCommand);
+  server.on("/ping", HTTP_GET, handlePing);
+  server.begin();
+  Serial.println("HTTP server started");
 }
 
 void loop() {
   webSocket.loop();
-
+  server.handleClient();
+  
   // 1. Handle messages from Arduino Mega
   if (Serial2.available()) {
     String payload = Serial2.readStringUntil('\n');
     processMegaMessage(payload);
   }
-
+  
   // 2. Read and send sensor data periodically
   if (millis() - previousMillis >= sensorInterval) {
     previousMillis = millis();
@@ -68,10 +81,62 @@ void loop() {
   }
 }
 
+void handleDoorCommand() {
+  if (server.hasArg("plain") == false) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No JSON data\"}");
+    return;
+  }
+
+  String json = server.arg("plain");
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, json);
+
+  if (error) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
+    return;
+  }
+
+  // Check required fields
+  if (!doc.containsKey("type") || !doc.containsKey("status") || !doc.containsKey("user")) {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing required fields\"}");
+    return;
+  }
+
+  String type = doc["type"];
+  String status = doc["status"];
+  String user = doc["user"];
+  int servoPin = doc["servoPin"] | 2; // Default to pin 2 if not specified
+
+  Serial.println("Door command received:");
+  Serial.print("Type: "); Serial.println(type);
+  Serial.print("Status: "); Serial.println(status);
+  Serial.print("User: "); Serial.println(user);
+  Serial.print("Servo Pin: "); Serial.println(servoPin);
+
+  // Forward command to Mega
+  StaticJsonDocument<200> megaDoc;
+  megaDoc["type"] = type;
+  megaDoc["status"] = status;
+  megaDoc["user"] = user;
+  megaDoc["servoPin"] = servoPin;
+  
+  String megaPayload;
+  serializeJson(megaDoc, megaPayload);
+  Serial2.println(megaPayload);
+
+  // Respond to client
+  String response = "{\"status\":\"success\",\"message\":\"Door command sent to Mega\"}";
+  server.send(200, "application/json", response);
+}
+
+void handlePing() {
+  server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"ESP32 is alive\"}");
+}
+
 void processMegaMessage(String payload) {
   payload.trim();
   Serial.println("From Mega: " + payload);
-
+  
   // Parse JSON message
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, payload);
@@ -122,7 +187,6 @@ void readAndSendSensorData() {
   if (!isnan(h) && !isnan(t)) {
     currentTemp = t;
     currentHumidity = h;
-
     // Create JSON payload
     StaticJsonDocument<200> sensorDoc;
     sensorDoc["type"] = "sensor";
@@ -131,10 +195,8 @@ void readAndSendSensorData() {
     sensorDoc["timestamp"] = millis()/1000;
     sensorDoc["datetime"] = getDateTime();
     sensorDoc["bulbState"] = bulbState;
-
     String sensorPayload;
     serializeJson(sensorDoc, sensorPayload);
-
     // Send to Node server
     sendHTTPPost("/api/sensor-data", sensorPayload);
     
@@ -205,7 +267,7 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
   DeserializationError error;
   String message;
   String cmd;
-
+  
   switch (type) {
     case WStype_DISCONNECTED:
       Serial.println("[WS] Disconnected");

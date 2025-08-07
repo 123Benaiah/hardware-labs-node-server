@@ -5,6 +5,8 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const morgan = require('morgan');
 const admin = require('firebase-admin');
+const fetch = require('node-fetch');
+const path = require('path');
 
 // Initialize Firebase
 const serviceAccount = require('./firebase-config.json');
@@ -17,15 +19,26 @@ const db = admin.database();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Enhanced CORS configuration
 app.use(cors({
-  origin: ['http://localhost', 'http://192.168.102.201'],
+  origin: ['http://localhost', 'http://192.168.8.100', 'http://127.0.0.1', '*'],
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
+
+// Middleware
 app.use(bodyParser.json({ limit: '10kb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(morgan(':method :url :status :response-time ms - :res[content-length]'));
+
+// Serve static files (for frontend)
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Serve the main HTML file
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // Get network IP
 function getIPAddress() {
@@ -60,33 +73,10 @@ let sensorData = {
   lastUpdated: null
 };
 
-// // WebSocket connection handler
-// wss.on('connection', (ws) => {
-//   clients.add(ws);
-//   console.log(`New client connected (${clients.size} total)`);
-
-//   // Send current state when client connects
-//   ws.send(bulbState);
-//   console.log(`Sent initial state: ${bulbState}`);
-
-//   // Handle client messages
-//   ws.on('message', (message) => {
-//     console.log(`Received from ESP32: ${message}`);
-
-//     if (message.toString().includes('status:')) {
-//       bulbState = message.toString().split(':')[1];
-//       console.log(`Bulb status updated to: ${bulbState}`);
-//       sensorData.bulbState = bulbState === 'on';
-//       updateFirebase();
-//     }
-//   });
-
-//   // Handle disconnections
-//   ws.on('close', () => {
-//     clients.delete(ws);
-//     console.log(`Client disconnected (${clients.size} remaining)`);
-//   });
-// });
+// ESP32 Configuration
+const ESP32_IP = '192.168.1.100'; // Update with your ESP32's IP
+const ESP32_PORT = '80';
+const ESP32_DOOR_ENDPOINT = '/door';
 
 // Update Firebase with current state
 async function updateFirebase() {
@@ -107,8 +97,6 @@ async function updateFirebase() {
     console.error('❌ Firebase update error:', error);
   }
 }
-
-// Add to your existing Node.js server code
 
 // WebSocket broadcast function
 function broadcast(message) {
@@ -163,7 +151,8 @@ app.get('/off', (req, res) => {
 
 // WebSocket connection handler
 wss.on('connection', (ws) => {
-  console.log('New WebSocket client connected');
+  clients.add(ws);
+  console.log(`New client connected (${clients.size} total)`);
   
   // Send current state on connection
   ws.send(JSON.stringify({
@@ -187,6 +176,12 @@ wss.on('connection', (ws) => {
       console.error('WebSocket message error:', err);
     }
   });
+  
+  // Handle disconnections
+  ws.on('close', () => {
+    clients.delete(ws);
+    console.log(`Client disconnected (${clients.size} remaining)`);
+  });
 });
 
 app.get('/status', (req, res) => {
@@ -202,7 +197,6 @@ app.post('/api/sensor-data', async (req, res) => {
   try {
     const { temperature, humidity, timestamp, datetime } = req.body;
     const now = new Date();
-
     sensorData = {
       temperature: parseFloat(temperature.toFixed(1)),
       humidity: parseFloat(humidity.toFixed(1)),
@@ -211,14 +205,12 @@ app.post('/api/sensor-data', async (req, res) => {
       bulbState: sensorData.bulbState,
       lastUpdated: now
     };
-
     await updateFirebase();
     
     console.log('📡 Received and synced sensor data:', {
       ...sensorData,
       receivedAt: new Date().toISOString()
     });
-
     res.status(200).json({
       status: 'success',
       message: 'Sensor data synced to Firebase',
@@ -227,7 +219,6 @@ app.post('/api/sensor-data', async (req, res) => {
         humidity: sensorData.humidity
       }
     });
-
   } catch (error) {
     console.error('❌ Sensor data error:', error);
     res.status(500).json({
@@ -247,6 +238,124 @@ app.get('/api/sensor-data', (req, res) => {
     });
   } catch (error) {
     console.error('❌ Data fetch error:', error);
+    res.status(500).json({
+      status: 'error',
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Face Recognition endpoint
+app.post('/api/face-recognition', async (req, res) => {
+  try {
+    const { type, status, user, servoPin } = req.body;
+    
+    // Validate required fields
+    if (!type || !status || !user) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Missing required fields'
+      });
+    }
+    
+    const now = new Date();
+    
+    // Store face recognition event in Firebase
+    const eventRef = db.ref('face_events').push();
+    await eventRef.set({
+      type,
+      status,
+      user,
+      servoPin: servoPin || 2, // Default to pin 2 if not specified
+      timestamp: Math.floor(now.getTime() / 1000),
+      datetime: now.toISOString(),
+      device: 'Web_Face_Recognition'
+    });
+    
+    console.log(`👤 Face Recognition Event: ${status} | User: ${user}`);
+    
+    // Forward command to ESP32
+    let esp32Response = { success: false };
+    try {
+      const esp32Url = `http://${ESP32_IP}:${ESP32_PORT}${ESP32_DOOR_ENDPOINT}`;
+      const response = await fetch(esp32Url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          type,
+          status,
+          user,
+          servoPin: servoPin || 2
+        })
+      });
+      
+      if (response.ok) {
+        esp32Response = await response.json();
+        console.log('✅ Command successfully forwarded to ESP32');
+      } else {
+        console.error('❌ Failed to forward command to ESP32:', response.status);
+      }
+    } catch (esp32Error) {
+      console.error('❌ Error forwarding to ESP32:', esp32Error);
+    }
+    
+    // Broadcast face recognition event to WebSocket clients
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({
+          type: 'face_event',
+          status,
+          user,
+          timestamp: now.toISOString()
+        }));
+      }
+    });
+    
+    res.status(200).json({
+      status: 'success',
+      message: 'Face recognition event processed',
+      user,
+      accessGranted: status === 'granted',
+      esp32Response
+    });
+    
+  } catch (error) {
+    console.error('❌ Face recognition error:', error);
+    res.status(500).json({
+      status: 'error',
+      error: 'Internal server error',
+      details: error.message
+    });
+  }
+});
+
+// Add endpoint to retrieve face recognition events
+app.get('/api/face-events', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const snapshot = await db.ref('face_events')
+      .orderByChild('timestamp')
+      .limitToLast(limit)
+      .once('value');
+    
+    const events = [];
+    snapshot.forEach(childSnapshot => {
+      events.push({
+        id: childSnapshot.key,
+        ...childSnapshot.val()
+      });
+    });
+    
+    res.status(200).json({
+      status: 'success',
+      count: events.length,
+      data: events.reverse()
+    });
+    
+  } catch (error) {
+    console.error('❌ Face events fetch error:', error);
     res.status(500).json({
       status: 'error',
       error: 'Internal server error'
@@ -327,11 +436,10 @@ app.get('/api/rfid-events', async (req, res) => {
   }
 });
 
-// 1. Receive Keypad Events
+// Receive Keypad Events
 app.post('/api/keypad-events', async (req, res) => {
   const data = req.body;
   console.log("Received Keypad Event:", data);
-
   try {
     const ref = db.ref('keypad_events').push();
     await ref.set({
@@ -340,32 +448,10 @@ app.post('/api/keypad-events', async (req, res) => {
       pin: data.pin || "",
       timestamp: Date.now()
     });
-
     res.status(200).json({ message: "Keypad event stored in Firebase." });
   } catch (err) {
     console.error("Error writing to Firebase:", err);
     res.status(500).json({ error: "Failed to store keypad event." });
-  }
-});
-
-// 2. Receive RFID Events
-app.post('/api/rfid-event', async (req, res) => {
-  const data = req.body;
-  console.log("Received RFID Event:", data);
-
-  try {
-    const ref = db.ref('rfid_events').push();
-    await ref.set({
-      status: data.status || "",
-      tag: data.tag || "",
-      action: data.action || "",
-      timestamp: Date.now()
-    });
-
-    res.status(200).json({ message: "RFID event stored in Firebase." });
-  } catch (err) {
-    console.error("Error writing to Firebase:", err);
-    res.status(500).json({ error: "Failed to store RFID event." });
   }
 });
 
@@ -375,7 +461,9 @@ app.get('/api/health', (req, res) => {
     status: 'running',
     serverTime: new Date().toISOString(),
     uptime: process.uptime(),
-    memoryUsage: process.memoryUsage()
+    memoryUsage: process.memoryUsage(),
+    ip: getIPAddress(),
+    port: PORT
   });
 });
 
